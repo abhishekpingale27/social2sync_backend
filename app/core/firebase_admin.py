@@ -2,7 +2,6 @@ import os
 import json
 from typing import Optional
 import logging
-import pathlib
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -52,31 +51,12 @@ def initialize_firebase() -> bool:
                 return True
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Invalid JSON in FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
+                return False
             except Exception as e:
                 logger.error(f"❌ Error initializing with service account JSON: {e}")
+                return False
         
-        # Fallback to service account file (local dev)
-        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-        if service_account_path:
-            # Handle relative paths
-            if service_account_path.startswith("./") or service_account_path.startswith("../"):
-                base_dir = pathlib.Path(os.getcwd())
-                service_account_path = str(base_dir / service_account_path.lstrip("./"))
-                logger.info(f"Converted relative path to absolute path: {service_account_path}")
-            
-            if os.path.exists(service_account_path):
-                logger.info(f"🔑 Using service account file: {service_account_path}")
-                try:
-                    cred = credentials.Certificate(service_account_path)
-                    firebase_admin.initialize_app(cred, {'projectId': project_id})
-                    logger.info("✅ Firebase initialized with service account file")
-                    return True
-                except Exception as e:
-                    logger.error(f"❌ Error loading service account file: {e}")
-            else:
-                logger.error(f"❌ Service account file not found at path: {service_account_path}")
-        
-        # Try individual environment variables (alternative fallback)
+        # Fallback to individual environment variables (alternative)
         private_key = os.getenv("FIREBASE_PRIVATE_KEY")
         client_email = os.getenv("FIREBASE_CLIENT_EMAIL")
         
@@ -101,6 +81,7 @@ def initialize_firebase() -> bool:
                 return True
             except Exception as e:
                 logger.error(f"❌ Error initializing with individual environment variables: {e}")
+                return False
         
         # Try Application Default Credentials (for production environments like Render)
         logger.info("🔑 Trying Application Default Credentials")
@@ -111,6 +92,7 @@ def initialize_firebase() -> bool:
             return True
         except Exception as adc_error:
             logger.error(f"❌ Failed to initialize with Application Default Credentials: {adc_error}")
+            return False
         
         logger.error("❌ All Firebase initialization methods failed")
         return False
@@ -131,7 +113,7 @@ def verify_firebase_token(token: str, check_revoked: bool = True) -> Optional[di
     Returns:
         Decoded token if valid, None otherwise
     """
-    DEV_MODE = os.getenv("ENVIRONMENT", "development").lower() == "development"
+    DEV_MODE = os.getenv("ENVIRONMENT", "production").lower() == "development"
     
     if not FIREBASE_AVAILABLE:
         logger.warning("⚠️ Firebase not available, cannot verify token")
@@ -149,33 +131,15 @@ def verify_firebase_token(token: str, check_revoked: bool = True) -> Optional[di
     
     try:
         if DEV_MODE:
-            try:
-                decoded_token = auth.verify_id_token(token, check_revoked=False)
-                user_id = decoded_token.get('uid')
-                if user_id:
-                    logger.info(f"✅ Development mode: Token verified for user: {user_id}")
-                    return decoded_token
-            except Exception as dev_error:
-                logger.warning(f"⚠️ Development mode: Token verification failed, using test token: {str(dev_error)}")
-                return {"uid": "test_user_firebase_uid_12345"}
+            logger.info("⚠️ Running in development mode, lenient token verification")
+            decoded_token = auth.verify_id_token(token, check_revoked=False)
+        else:
+            decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
         
-        # Production mode
-        decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
         user_id = decoded_token.get('uid')
         if not user_id:
             logger.error("❌ No user ID found in token")
             return None
-            
-        try:
-            user_record = auth.get_user(user_id)
-            if user_record.disabled:
-                logger.error(f"❌ User {user_id} is disabled")
-                return None
-        except auth.UserNotFoundError:
-            logger.error(f"❌ User {user_id} not found")
-            return None
-        except Exception as user_error:
-            logger.error(f"❌ Error checking user status: {str(user_error)}")
             
         logger.info(f"✅ Token verified successfully for user: {user_id}")
         return decoded_token
@@ -199,7 +163,7 @@ def get_firebase_user(uid: str):
     Get Firebase user information by UID.
     
     Args:
-        uid: The Firebase user ID
+        uid: The Firebase user ID (string)
         
     Returns:
         Firebase user record if found, None otherwise
@@ -210,6 +174,10 @@ def get_firebase_user(uid: str):
     
     if not initialize_firebase():
         logger.error("❌ Firebase not initialized, cannot get user")
+        return None
+    
+    if not isinstance(uid, str):
+        logger.error(f"❌ Invalid UID type: {type(uid)}, expected string")
         return None
     
     try:
@@ -292,4 +260,4 @@ firebase_initialized = initialize_firebase()
 if firebase_initialized:
     logger.info("✅ Firebase Admin SDK initialized successfully")
 else:
-    logger.warning("⚠️ Firebase Admin SDK initialization failed - running in development mode")
+    logger.error("❌ Firebase Admin SDK initialization failed")
