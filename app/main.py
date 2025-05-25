@@ -67,7 +67,7 @@ app = FastAPI(title="SocialSync AI Services")
 # Enhanced CORS Middleware with more permissive settings for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development (restrict in production)
+    allow_origins=["https://social2sync.vercel.app"],  # Allow all origins for development (restrict in production)
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods
     allow_headers=["*"],  # Allow all headers
