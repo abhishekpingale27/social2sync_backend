@@ -1,7 +1,6 @@
-# Backend/app/api/dependencies.py - IMPROVED VERSION
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional
+from typing import Optional, Dict
 import os
 import logging
 
@@ -13,15 +12,15 @@ logger.setLevel(logging.DEBUG)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 # Check if we're in development mode
-DEV_MODE = os.getenv("ENVIRONMENT", "development").lower() == "development"
+DEV_MODE = os.getenv("ENVIRONMENT", "production").lower() == "development"
 if DEV_MODE:
     logger.warning("⚠️ Running in DEVELOPMENT mode - authentication required but with verbose logging")
 else:
     logger.info("🔒 Running in PRODUCTION mode - strict authentication enforced")
 
-async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> str:
+async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Dict[str, any]:
     """
-    Validates the Firebase JWT token and returns the user ID.
+    Validates the Firebase JWT token and returns user information.
     This function should be used as a dependency for all protected routes.
     Implements strict user authentication and data isolation.
     """
@@ -31,13 +30,19 @@ async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = De
     firebase_configured = (
         os.getenv("FIREBASE_PROJECT_ID") and 
         (
-            os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or
             os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or
             os.getenv("FIREBASE_PRIVATE_KEY")
         )
     )
     
     logger.debug(f"🔧 Firebase configured: {firebase_configured}")
+    if not firebase_configured:
+        logger.error("❌ Firebase configuration missing")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
     # Require credentials in all modes
     if not credentials:
@@ -70,9 +75,8 @@ async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = De
         if not check_revoked:
             logger.warning("⚠️ Development mode: Skipping token revocation check")
             
-        firebase_uid = verify_firebase_token(token, check_revoked=check_revoked)
-        
-        if not firebase_uid:
+        decoded_token = verify_firebase_token(token, check_revoked=check_revoked)
+        if not decoded_token:
             logger.error("❌ Token verification failed")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -80,10 +84,19 @@ async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = De
                 headers={"WWW-Authenticate": "Bearer"}
             )
         
+        user_id = decoded_token.get('uid')
+        if not user_id:
+            logger.error("❌ No user ID in decoded token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: No user ID",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        
         # Additional verification: ensure the user exists and is not disabled
-        user_record = get_firebase_user(firebase_uid)
+        user_record = get_firebase_user(user_id)
         if not user_record:
-            logger.error(f"❌ User {firebase_uid} not found in Firebase")
+            logger.error(f"❌ User {user_id} not found in Firebase")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User account not found or disabled",
@@ -92,12 +105,16 @@ async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = De
             
         # Log authentication success with email if available
         user_email = getattr(user_record, 'email', 'unknown')
-        logger.info(f"✅ Authentication successful for user: {firebase_uid} ({user_email})")
+        logger.info(f"✅ Authentication successful for user: {user_id} ({user_email})")
             
-        return firebase_uid
+        # Return user info similar to suggested version
+        return {
+            "user_id": user_id,
+            "email": user_email,
+            "decoded_token": decoded_token
+        }
         
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except ImportError as e:
         logger.error(f"❌ Firebase admin not available: {e}")
@@ -107,22 +124,20 @@ async def auth_required(credentials: Optional[HTTPAuthorizationCredentials] = De
             headers={"WWW-Authenticate": "Bearer"}
         )
     except Exception as e:
-        # Log the error but provide a generic message to the client
         logger.error(f"❌ Authentication error: {str(e)}")
         logger.error(f"❌ Error type: {type(e)}")
         import traceback
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
-        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-async def optional_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Optional[str]:
+async def optional_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> Optional[Dict[str, any]]:
     """
     Optional authentication dependency.
-    Returns the user ID if authenticated, None otherwise.
+    Returns user info if authenticated, None otherwise.
     """
     if not credentials:
         return None
@@ -140,37 +155,32 @@ def resource_owner_required(resource_owner_id: str):
     Factory function that creates a dependency to ensure the authenticated user
     is the owner of the resource being accessed.
     
-    This function is crucial for proper user data isolation, ensuring users can only
-    access their own resources.
-    
     Args:
         resource_owner_id: The ID of the user who owns the resource
         
     Returns:
         A dependency function that validates the current user has permission to access the resource
     """
-    async def validate_resource_ownership(current_user_id: str = Depends(auth_required)) -> str:
+    async def validate_resource_ownership(current_user: Dict[str, any] = Depends(auth_required)) -> Dict[str, any]:
         """
         Validates that the current user is the owner of the resource.
         
         Args:
-            current_user_id: The ID of the authenticated user from auth_required dependency
+            current_user: User info from auth_required dependency
             
         Returns:
-            The user ID if validation succeeds
+            User info if validation succeeds
             
         Raises:
             HTTPException: If the user is not the owner of the resource
         """
-        # Import here to avoid circular imports
         from app.core.firebase_admin import validate_user_resource_access
         
-        # Check if the current user is the owner of the resource
-        if validate_user_resource_access(current_user_id, resource_owner_id):
-            return current_user_id
+        user_id = current_user["user_id"]
+        if validate_user_resource_access(user_id, resource_owner_id):
+            return current_user
             
-        # If we get here, the user is not the owner of the resource
-        logger.warning(f"🚫 User {current_user_id} attempted to access resource owned by {resource_owner_id}")
+        logger.warning(f"🚫 User {user_id} attempted to access resource owned by {resource_owner_id}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access this resource"
