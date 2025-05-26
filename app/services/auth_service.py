@@ -1,4 +1,4 @@
-# app/services/auth_service.py
+# Backend/app/services/auth_service.py - FIXED VERSION
 from pymongo.errors import DuplicateKeyError
 from fastapi import HTTPException, status
 from app.models.user import UserCreate, PasswordResetRequest, PasswordReset, UserProfile
@@ -13,8 +13,12 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 def convert_objectid_to_str(doc: dict) -> dict:
     """Convert MongoDB ObjectId to string for JSON serialization"""
@@ -45,37 +49,47 @@ async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name:
     This ensures every user has a firebase_uid for proper data isolation.
     
     Args:
-        uid: Firebase user ID
+        uid: Firebase user ID (must be a string)
         email: User email
         display_name: User display name (optional)
         
     Returns:
         User document with ObjectIds converted to strings
     """
+    # Validate inputs
     if not uid:
+        logger.error("❌ Firebase UID is required")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Firebase UID is required"
         )
         
+    if not isinstance(uid, str):
+        logger.error(f"❌ Invalid UID type: {type(uid)}, expected string. UID value: {uid}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid UID format"
+        )
+        
     if not email:
+        logger.error("❌ Email is required")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email is required"
         )
     
     try:
-        print(f"🔍 Looking for user with Firebase UID: {uid}")
+        logger.info(f"🔍 Looking for user with Firebase UID: {uid}")
         
         # Check if user exists by Firebase UID (primary lookup)
         user = await users_collection.find_one({"firebase_uid": uid})
         
         # If not found by UID, try to find by email (for migration cases)
         if not user:
-            print(f"🔍 User not found by UID, checking by email: {email}")
+            logger.info(f"🔍 User not found by UID, checking by email: {email}")
             user = await users_collection.find_one({"email": email})
             if user and not user.get("firebase_uid"):
-                print("🔄 Migrating existing user to Firebase UID")
+                logger.info("🔄 Migrating existing user to Firebase UID")
                 # Update existing user with Firebase UID (migration)
                 await users_collection.update_one(
                     {"_id": user["_id"]},
@@ -84,7 +98,7 @@ async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name:
                 user["firebase_uid"] = uid
         
         if user:
-            print(f"✅ Existing user found: {user.get('email')}")
+            logger.info(f"✅ Existing user found: {user.get('email')}")
             # User exists, update last login and other fields if needed
             update_fields = {"last_login": datetime.utcnow()}
             
@@ -103,7 +117,7 @@ async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name:
             # Convert ObjectId to string for JSON serialization
             return convert_objectid_to_str(user)
         
-        print(f"🆕 Creating new user for UID: {uid}")
+        logger.info(f"🆕 Creating new user for UID: {uid}")
         # User doesn't exist, create new user
         new_user = {
             "firebase_uid": uid,
@@ -122,12 +136,13 @@ async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name:
         created_user = await users_collection.find_one({"_id": result.inserted_id})
         
         if not created_user:
+            logger.error("❌ Failed to create user")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create user"
             )
         
-        print(f"✅ New user created successfully")
+        logger.info("✅ New user created successfully")
         
         # Convert ObjectId to string for JSON serialization
         return convert_objectid_to_str(created_user)
@@ -135,9 +150,9 @@ async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name:
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"❌ Error in get_or_create_user_by_firebase_uid: {e}")
+        logger.error(f"❌ Error in get_or_create_user_by_firebase_uid: {e}")
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while processing your request. Please try again."
@@ -148,11 +163,15 @@ async def get_user_by_firebase_uid(uid: str) -> Optional[dict]:
     Get a user by Firebase UID.
     
     Args:
-        uid: Firebase user ID
+        uid: Firebase user ID (must be a string)
         
     Returns:
         User document with ObjectIds converted to strings or None if not found
     """
+    if not isinstance(uid, str):
+        logger.error(f"❌ Invalid UID type: {type(uid)}, expected string")
+        return None
+        
     user = await users_collection.find_one({"firebase_uid": uid})
     if user:
         return convert_objectid_to_str(user)
@@ -163,12 +182,19 @@ async def update_user_profile(uid: str, profile_data: Dict[str, Any]) -> dict:
     Update a user's profile data.
     
     Args:
-        uid: Firebase user ID
+        uid: Firebase user ID (must be a string)
         profile_data: Profile data to update
         
     Returns:
         Updated user document with ObjectIds converted to strings
     """
+    if not isinstance(uid, str):
+        logger.error(f"❌ Invalid UID type: {type(uid)}, expected string")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid UID format"
+        )
+        
     user = await get_user_by_firebase_uid(uid)
     if not user:
         raise HTTPException(
@@ -221,7 +247,7 @@ async def create_new_user(user_data: UserCreate) -> dict:
             detail="An account with this email already exists."
         )
     except Exception as e:
-        print(f"Error creating user: {e}")
+        logger.error(f"Error creating user: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred during user creation."
