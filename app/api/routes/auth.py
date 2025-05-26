@@ -1,4 +1,4 @@
-# app/api/routes/auth.py
+# Backend/app/api/routes/auth.py - FIXED VERSION
 from fastapi import APIRouter, HTTPException, status, Depends
 from app.models.user import UserCreate, UserLogin, UserViewModel, PasswordResetRequest, PasswordReset, FirebaseAuth, UserProfile
 from app.services.auth_service import (
@@ -11,14 +11,18 @@ from app.core.firebase_admin import verify_firebase_token
 from bson import ObjectId
 from datetime import datetime
 from typing import Dict, Any
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Import Firebase admin correctly
 try:
     from firebase_admin import auth as firebase_auth
     FIREBASE_AVAILABLE = True
-    print("✅ Firebase admin auth imported successfully")
+    logger.info("✅ Firebase admin auth imported successfully")
 except ImportError as e:
-    print(f"❌ Firebase admin import failed: {e}")
+    logger.error(f"❌ Firebase admin import failed: {e}")
     FIREBASE_AVAILABLE = False
 
 router = APIRouter()
@@ -31,7 +35,7 @@ async def register_user(user_in: UserCreate):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Unexpected error during registration: {e}")
+        logger.error(f"Unexpected error during registration: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred during registration."
@@ -54,12 +58,12 @@ async def login_user(form_data: UserLogin):
         )
         user_dict_from_db["last_login"] = current_time
     except Exception as e:
-        print(f"Error updating last_login: {e}")
+        logger.error(f"Error updating last_login: {e}")
     try:
         user_view = UserViewModel(**user_dict_from_db)
     except Exception as pydantic_error:
-        print(f"Pydantic validation error during login: {pydantic_error}")
-        print(f"Data passed to UserViewModel: {user_dict_from_db}")
+        logger.error(f"Pydantic validation error during login: {pydantic_error}")
+        logger.error(f"Data passed to UserViewModel: {user_dict_from_db}")
         raise HTTPException(
             status_code=500,
             detail="Internal server error: Could not process user data."
@@ -77,7 +81,7 @@ async def forgot_password(reset_request: PasswordResetRequest):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Error processing password reset request: {e}")
+        logger.error(f"Error processing password reset request: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred."
@@ -91,7 +95,7 @@ async def reset_password_endpoint(reset_data: PasswordReset):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Error resetting password: {e}")
+        logger.error(f"Error resetting password: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred."
@@ -109,7 +113,7 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
         User data and message
     """
     try:
-        print(f"🔄 Processing Firebase auth request...")
+        logger.info("🔄 Processing Firebase auth request...")
         
         if not auth_data or not auth_data.token:
             raise HTTPException(
@@ -117,22 +121,30 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
                 detail="Token is required"
             )
             
-        print(f"🔑 Verifying Firebase token...")
-        # Verify the Firebase token
+        logger.info("🔑 Verifying Firebase token...")
+        # Verify the Firebase token - this should return just the UID string
         uid = verify_firebase_token(auth_data.token)
         if not uid:
-            print("❌ Token verification failed")
+            logger.error("❌ Token verification failed")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired Firebase token",
                 headers={"WWW-Authenticate": "Bearer"}
             )
         
-        print(f"✅ Token verified for user: {uid}")
+        # Ensure UID is a string (critical fix)
+        if not isinstance(uid, str):
+            logger.error(f"❌ Invalid UID type from verify_firebase_token: {type(uid)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Authentication token format error"
+            )
+        
+        logger.info(f"✅ Token verified for user: {uid}")
         
         # Check if Firebase admin is available
         if not FIREBASE_AVAILABLE:
-            print("⚠️ Firebase admin not available, using basic auth")
+            logger.warning("⚠️ Firebase admin not available, using basic auth")
             # Fallback: create user with basic info
             user_dict = await get_or_create_user_by_firebase_uid(
                 uid=uid,
@@ -146,7 +158,7 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
             }
         
         try:
-            print(f"🔍 Getting Firebase user info for: {uid}")
+            logger.info(f"🔍 Getting Firebase user info for: {uid}")
             # Import the helper function
             from app.core.firebase_admin import get_firebase_user
             
@@ -155,16 +167,16 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
             if not firebase_user:
                 raise Exception("Could not retrieve Firebase user info")
                 
-            print(f"✅ Firebase user info retrieved: {firebase_user.email}")
+            logger.info(f"✅ Firebase user info retrieved: {firebase_user.email}")
             
-            # Get or create user in our database
+            # Get or create user in our database with the UID string
             user_dict = await get_or_create_user_by_firebase_uid(
-                uid=uid,
+                uid=uid,  # This is now guaranteed to be a string
                 email=firebase_user.email,
                 display_name=firebase_user.display_name
             )
             
-            print(f"✅ User processed successfully")
+            logger.info("✅ User processed successfully")
             
             # Return user data
             return {
@@ -173,14 +185,14 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
             }
             
         except Exception as firebase_error:
-            print(f"❌ Firebase user retrieval error: {firebase_error}")
-            print(f"Error type: {type(firebase_error)}")
+            logger.error(f"❌ Firebase user retrieval error: {firebase_error}")
+            logger.error(f"Error type: {type(firebase_error)}")
             
             # Fallback: create user with UID and basic email
             try:
                 # Try to extract email from the token if possible
                 user_dict = await get_or_create_user_by_firebase_uid(
-                    uid=uid,
+                    uid=uid,  # This is guaranteed to be a string
                     email=f"{uid}@firebase.user",  # Temporary email
                     display_name="Firebase User"
                 )
@@ -190,7 +202,7 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
                     "user": user_dict
                 }
             except Exception as fallback_error:
-                print(f"❌ Fallback user creation failed: {fallback_error}")
+                logger.error(f"❌ Fallback user creation failed: {fallback_error}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Failed to create user account"
@@ -199,10 +211,10 @@ async def firebase_auth_endpoint(auth_data: FirebaseAuth):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"❌ Error during Firebase authentication: {str(e)}")
-        print(f"Error type: {type(e)}")
+        logger.error(f"❌ Error during Firebase authentication: {str(e)}")
+        logger.error(f"Error type: {type(e)}")
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         
         # Return a more generic error message to avoid exposing sensitive information
         raise HTTPException(
@@ -232,7 +244,7 @@ async def get_current_user(current_user_id: str = Depends(auth_required)):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Error getting current user: {e}")
+        logger.error(f"Error getting current user: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred."
@@ -259,7 +271,7 @@ async def update_current_user(profile_data: UserProfile, current_user_id: str = 
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"Error updating user profile: {e}")
+        logger.error(f"Error updating user profile: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred."
