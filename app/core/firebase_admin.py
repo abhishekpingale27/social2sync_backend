@@ -1,3 +1,4 @@
+# Backend/app/core/firebase_admin.py - FIXED VERSION
 import os
 import json
 from typing import Optional
@@ -33,18 +34,23 @@ def initialize_firebase() -> bool:
         return True
     
     try:
+        logger.info("🚀 Initializing Firebase Admin SDK...")
         project_id = os.getenv("FIREBASE_PROJECT_ID")
         service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
         
-        if not project_id or not service_account_json:
-            logger.error("❌ Missing FIREBASE_PROJECT_ID or FIREBASE_SERVICE_ACCOUNT_JSON")
+        if not project_id:
+            logger.error("❌ Missing FIREBASE_PROJECT_ID")
+            return False
+            
+        if not service_account_json:
+            logger.error("❌ Missing FIREBASE_SERVICE_ACCOUNT_JSON")
             return False
         
-        logger.info("🔑 Using service account JSON")
+        logger.info("🔑 Using service account JSON from environment variable")
         cred_dict = json.loads(service_account_json)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'projectId': project_id})
-        logger.info("✅ Firebase initialized")
+        logger.info("✅ Firebase initialized with service account JSON")
         return True
         
     except json.JSONDecodeError as e:
@@ -61,26 +67,24 @@ def verify_firebase_token(token: str, check_revoked: bool = True) -> Optional[st
         token: Firebase ID token
         check_revoked: Check if token is revoked
     Returns:
-        User ID if valid, None otherwise
+        User ID (UID) if valid, None otherwise
     """
-    DEV_MODE = os.getenv("ENVIRONMENT", "production").lower() == "development"
-    
     if not FIREBASE_AVAILABLE or not initialize_firebase():
         logger.error("❌ Firebase not available or not initialized")
-        if DEV_MODE:
-            logger.warning("⚠️ Development mode: Returning test UID")
-            return "test_user_firebase_uid_12345"
         return None
     
     try:
-        decoded_token = auth.verify_id_token(token, check_revoked=not DEV_MODE)
+        # Verify the Firebase ID token
+        decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
+        
+        # Extract the UID from the decoded token
         user_id = decoded_token.get('uid')
         if not user_id:
             logger.error("❌ No user ID in token")
             return None
             
-        logger.info(f"✅ Token verified for user: {user_id}")
-        return user_id
+        logger.info(f"✅ Token verified successfully for user: {user_id}")
+        return user_id  # Return only the UID string, not the entire token
             
     except auth.ExpiredIdTokenError:
         logger.error("❌ Token expired")
@@ -138,9 +142,9 @@ def validate_user_resource_access(user_id: str, resource_owner_id: str) -> bool:
     return False
 
 # Initialize Firebase
-logger.info("🚀 Initializing Firebase...")
+logger.info("🚀 Initializing Firebase Admin SDK...")
 firebase_initialized = initialize_firebase()
 if firebase_initialized:
-    logger.info("✅ Firebase initialized successfully")
+    logger.info("✅ Firebase Admin SDK initialized successfully")
 else:
-    logger.error("❌ Firebase initialization failed")
+    logger.error("❌ Firebase Admin SDK initialization failed")
